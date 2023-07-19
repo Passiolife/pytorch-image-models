@@ -67,7 +67,7 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
-        self.fused_attn = use_fused_attn()
+        self.fused_attn = False#use_fused_attn()
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
@@ -97,7 +97,7 @@ class Attention(nn.Module):
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x
+        return x, attn
 
 
 class LayerScale(nn.Module):
@@ -151,10 +151,14 @@ class Block(nn.Module):
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
-    def forward(self, x):
-        x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
+    def forward(self, x, return_attention=False):
+        xa, att = self.attn(self.norm1(x))
+        x = x + self.drop_path1(self.ls1(xa))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
-        return x
+        if return_attention:
+            return x, att
+        else:
+            return x
 
 
 class ResPostBlock(nn.Module):
@@ -206,10 +210,14 @@ class ResPostBlock(nn.Module):
             nn.init.constant_(self.norm1.weight, self.init_values)
             nn.init.constant_(self.norm2.weight, self.init_values)
 
-    def forward(self, x):
-        x = x + self.drop_path1(self.norm1(self.attn(x)))
+    def forward(self, x, return_attention=False):
+        xa, att = self.attn(x)
+        x = x + self.drop_path1(self.norm1(xa))
         x = x + self.drop_path2(self.norm2(self.mlp(x)))
-        return x
+        if return_attention:
+            return x, att
+        else:
+            return x
 
 
 class ParallelScalingBlock(nn.Module):
@@ -609,7 +617,7 @@ class VisionTransformer(nn.Module):
             return tuple(zip(outputs, class_tokens))
         return tuple(outputs)
 
-    def forward_features(self, x):
+    def forward_features(self, x, return_attention=False):
         x = self.patch_embed(x)
         x = self._pos_embed(x)
         x = self.patch_drop(x)
@@ -617,9 +625,16 @@ class VisionTransformer(nn.Module):
         if self.grad_checkpointing and not torch.jit.is_scripting():
             x = checkpoint_seq(self.blocks, x)
         else:
-            x = self.blocks(x)
+            for i, blk in enumerate(self.blocks):
+                if not return_attention:
+                    x = blk(x)
+                elif i < len(self.blocks)-1:
+                    x, a = blk(x, return_attention=return_attention)
         x = self.norm(x)
-        return x
+        if return_attention:
+            return x, a
+        else:
+            return x
 
     def forward_head(self, x, pre_logits: bool = False):
         if self.global_pool:
