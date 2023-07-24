@@ -622,14 +622,12 @@ class VisionTransformer(nn.Module):
         x = self._pos_embed(x)
         x = self.patch_drop(x)
         x = self.norm_pre(x)
+
         if self.grad_checkpointing and not torch.jit.is_scripting():
             x = checkpoint_seq(self.blocks, x)
         else:
             for i, blk in enumerate(self.blocks):
-                if not return_attention:
-                    x = blk(x)
-                elif i < len(self.blocks)-1:
-                    x, a = blk(x, return_attention=return_attention)
+                x, a = blk(x, return_attention=True)
         x = self.norm(x)
         if return_attention:
             return x, a
